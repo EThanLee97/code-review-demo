@@ -7,7 +7,9 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "next typegen --webpack && tsc --noEmit",
+    "ai-review": "node scripts/ai-review.mjs",
+    "ai-review:comment": "node scripts/post-review-comment.mjs"
   },
   "dependencies": {
     "next": "16.3.0",

@@ -1,0 +1,71 @@
+name: AI Review
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: Review pull request
+    runs-on: ubuntu-latest
+    env:
+      AI_REVIEW_PROVIDER: ${{ vars.AI_REVIEW_PROVIDER || 'openai' }}
+      AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL || 'gpt-5-mini' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+
+    steps:
+      - name: Skip when provider key is missing
+        if: ${{ (env.AI_REVIEW_PROVIDER == 'openai' && env.OPENAI_API_KEY == '') || (env.AI_REVIEW_PROVIDER == 'anthropic' && env.ANTHROPIC_API_KEY == '') }}
+        run: echo "AI review provider key is not configured. Skipping AI review."
+
+      - name: Checkout
+        if: ${{ !((env.AI_REVIEW_PROVIDER == 'openai' && env.OPENAI_API_KEY == '') || (env.AI_REVIEW_PROVIDER == 'anthropic' && env.ANTHROPIC_API_KEY == '')) }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        if: ${{ !((env.AI_REVIEW_PROVIDER == 'openai' && env.OPENAI_API_KEY == '') || (env.AI_REVIEW_PROVIDER == 'anthropic' && env.ANTHROPIC_API_KEY == '')) }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        if: ${{ !((env.AI_REVIEW_PROVIDER == 'openai' && env.OPENAI_API_KEY == '') || (env.AI_REVIEW_PROVIDER == 'anthropic' && env.ANTHROPIC_API_KEY == '')) }}
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
+
+      - name: Collect diff
+        if: ${{ !((env.AI_REVIEW_PROVIDER == 'openai' && env.OPENAI_API_KEY == '') || (env.AI_REVIEW_PROVIDER == 'anthropic' && env.ANTHROPIC_API_KEY == '')) }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --unified=80 "$BASE_SHA" "$HEAD_SHA" > /tmp/pr.diff
+          sed -n '1,1200p' /tmp/pr.diff > /tmp/pr-limited.diff
+          mv /tmp/pr-limited.diff /tmp/pr.diff
+
+      - name: Generate review
+        if: ${{ !((env.AI_REVIEW_PROVIDER == 'openai' && env.OPENAI_API_KEY == '') || (env.AI_REVIEW_PROVIDER == 'anthropic' && env.ANTHROPIC_API_KEY == '')) }}
+        run: |
+          pnpm ai-review
+
+      - name: Post review comment
+        if: ${{ !((env.AI_REVIEW_PROVIDER == 'openai' && env.OPENAI_API_KEY == '') || (env.AI_REVIEW_PROVIDER == 'anthropic' && env.ANTHROPIC_API_KEY == '')) }}
+        env:
+          AI_REVIEW_PLATFORM: github
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          pnpm ai-review:comment

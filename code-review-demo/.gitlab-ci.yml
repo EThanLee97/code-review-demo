@@ -1,0 +1,33 @@
+stages:
+  - quality
+  - review
+
+variables:
+  AI_REVIEW_PROVIDER: "openai"
+  AI_REVIEW_MODEL: "gpt-5-mini"
+
+quality:
+  stage: quality
+  image: node:22
+  before_script:
+    - corepack enable
+    - pnpm install --frozen-lockfile
+  script:
+    - pnpm lint
+    - pnpm typecheck
+    - pnpm build
+
+ai_review:
+  stage: review
+  image: node:22
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $GITLAB_TOKEN && (($AI_REVIEW_PROVIDER == "openai" && $OPENAI_API_KEY) || ($AI_REVIEW_PROVIDER == "anthropic" && $ANTHROPIC_API_KEY))'
+  before_script:
+    - corepack enable
+    - pnpm install --frozen-lockfile
+  script:
+    - git diff --unified=80 "$CI_MERGE_REQUEST_DIFF_BASE_SHA" "$CI_COMMIT_SHA" > /tmp/pr.diff
+    - sed -n '1,1200p' /tmp/pr.diff > /tmp/pr-limited.diff
+    - mv /tmp/pr-limited.diff /tmp/pr.diff
+    - pnpm ai-review
+    - AI_REVIEW_PLATFORM=gitlab pnpm ai-review:comment
