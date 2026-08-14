@@ -67,5 +67,6 @@ jobs:
           AI_REVIEW_PLATFORM: github
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
           pnpm ai-review:comment

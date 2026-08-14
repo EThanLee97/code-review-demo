@@ -1,20 +1,30 @@
 import { readFile } from "node:fs/promises";
 
-const reviewFile = process.env.AI_REVIEW_OUTPUT_FILE || "/tmp/ai-review.md";
+const reviewFile =
+  process.env.AI_REVIEW_OUTPUT_FILE || "/tmp/ai-review-findings.json";
 const platform = process.env.AI_REVIEW_PLATFORM || detectPlatform();
-const body = await readFile(reviewFile, "utf8");
+const findings = JSON.parse(await readFile(reviewFile, "utf8"));
+
+if (!Array.isArray(findings)) {
+  throw new Error("AI review findings file must contain a JSON array.");
+}
+
+if (findings.length === 0) {
+  console.log("No AI review findings to post.");
+  process.exit(0);
+}
 
 if (platform === "github") {
-  await postGithubComment(body);
+  await postGithubComments(findings);
 } else if (platform === "gitlab") {
-  await postGitlabComment(body);
+  await postGitlabComments(findings);
 } else {
   throw new Error(
     "Unable to detect platform. Set AI_REVIEW_PLATFORM to github or gitlab.",
   );
 }
 
-console.log(`AI review comment posted to ${platform}.`);
+console.log(`Posted ${findings.length} AI review inline comments to ${platform}.`);
 
 function detectPlatform() {
   if (process.env.GITHUB_ACTIONS) {
@@ -28,55 +38,87 @@ function detectPlatform() {
   return "";
 }
 
-async function postGithubComment(commentBody) {
+async function postGithubComments(comments) {
   const token = process.env.GITHUB_TOKEN;
   const repository = process.env.GITHUB_REPOSITORY;
-  const issueNumber = process.env.GITHUB_PR_NUMBER;
+  const pullNumber = process.env.GITHUB_PR_NUMBER;
+  const commitId = process.env.GITHUB_COMMIT_ID;
   const apiUrl = process.env.GITHUB_API_URL || "https://api.github.com";
 
-  if (!token || !repository || !issueNumber) {
+  if (!token || !repository || !pullNumber || !commitId) {
     throw new Error(
-      "GitHub comments require GITHUB_TOKEN, GITHUB_REPOSITORY, and GITHUB_PR_NUMBER.",
+      "GitHub inline comments require GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_PR_NUMBER, and GITHUB_COMMIT_ID.",
     );
   }
 
-  await postJson(`${apiUrl}/repos/${repository}/issues/${issueNumber}/comments`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    body: {
-      body: commentBody,
-    },
-  });
+  for (const comment of comments) {
+    await postJson(`${apiUrl}/repos/${repository}/pulls/${pullNumber}/comments`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      body: {
+        body: formatComment(comment),
+        commit_id: commitId,
+        path: comment.file,
+        line: comment.line,
+        side: "RIGHT",
+      },
+    });
+  }
 }
 
-async function postGitlabComment(commentBody) {
+async function postGitlabComments(comments) {
   const token = process.env.GITLAB_TOKEN;
   const apiUrl = process.env.CI_API_V4_URL || "https://gitlab.com/api/v4";
   const projectId = process.env.CI_PROJECT_ID;
   const mergeRequestIid = process.env.CI_MERGE_REQUEST_IID;
+  const baseSha = process.env.CI_MERGE_REQUEST_DIFF_BASE_SHA;
+  const startSha = process.env.CI_MERGE_REQUEST_TARGET_BRANCH_SHA || baseSha;
+  const headSha = process.env.CI_COMMIT_SHA;
 
-  if (!token || !projectId || !mergeRequestIid) {
+  if (
+    !token ||
+    !projectId ||
+    !mergeRequestIid ||
+    !baseSha ||
+    !startSha ||
+    !headSha
+  ) {
     throw new Error(
-      "GitLab comments require GITLAB_TOKEN, CI_PROJECT_ID, and CI_MERGE_REQUEST_IID.",
+      "GitLab inline comments require GITLAB_TOKEN, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, CI_MERGE_REQUEST_DIFF_BASE_SHA, CI_MERGE_REQUEST_TARGET_BRANCH_SHA, and CI_COMMIT_SHA.",
     );
   }
 
-  await postJson(
-    `${apiUrl}/projects/${encodeURIComponent(
-      projectId,
-    )}/merge_requests/${mergeRequestIid}/notes`,
-    {
-      headers: {
-        "PRIVATE-TOKEN": token,
+  for (const comment of comments) {
+    await postJson(
+      `${apiUrl}/projects/${encodeURIComponent(
+        projectId,
+      )}/merge_requests/${mergeRequestIid}/discussions`,
+      {
+        headers: {
+          "PRIVATE-TOKEN": token,
+        },
+        body: {
+          body: formatComment(comment),
+          position: {
+            position_type: "text",
+            base_sha: baseSha,
+            start_sha: startSha,
+            head_sha: headSha,
+            old_path: comment.file,
+            new_path: comment.file,
+            new_line: comment.line,
+          },
+        },
       },
-      body: {
-        body: commentBody,
-      },
-    },
-  );
+    );
+  }
+}
+
+function formatComment(comment) {
+  return `**${comment.severity}: ${comment.title}**\n\n${comment.body}`;
 }
 
 async function postJson(url, { headers, body }) {
