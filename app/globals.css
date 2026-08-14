@@ -3,11 +3,48 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --accent: #2563eb;
+  --accent-foreground: #ffffff;
+  --accent-soft: #dbeafe;
+  --accent-muted: #eff6ff;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --text-muted: #52525b;
+  --border-subtle: rgba(23, 23, 23, 0.08);
+}
+
+:root[data-theme="emerald"],
+[data-theme="emerald"] {
+  --accent: #059669;
+  --accent-soft: #d1fae5;
+  --accent-muted: #ecfdf5;
+}
+
+:root[data-theme="rose"],
+[data-theme="rose"] {
+  --accent: #e11d48;
+  --accent-soft: #ffe4e6;
+  --accent-muted: #fff1f2;
+}
+
+:root[data-theme="amber"],
+[data-theme="amber"] {
+  --accent: #d97706;
+  --accent-soft: #fef3c7;
+  --accent-muted: #fffbeb;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-muted: var(--accent-muted);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-text-muted: var(--text-muted);
+  --color-border-subtle: var(--border-subtle);
   --font-sans: Arial, Helvetica, sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
@@ -16,6 +53,17 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --accent-soft: color-mix(in srgb, var(--accent) 32%, #0a0a0a);
+    --accent-muted: color-mix(in srgb, var(--accent) 18%, #0a0a0a);
+    --surface: #111113;
+    --surface-muted: #18181b;
+    --text-muted: #a1a1aa;
+    --border-subtle: rgba(255, 255, 255, 0.14);
+  }
+
+  [data-theme] {
+    --accent-soft: color-mix(in srgb, var(--accent) 32%, #0a0a0a);
+    --accent-muted: color-mix(in srgb, var(--accent) 18%, #0a0a0a);
   }
 }
 
