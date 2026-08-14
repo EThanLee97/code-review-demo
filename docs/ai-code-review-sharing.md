@@ -111,8 +111,8 @@ pnpm build
 1. 在 PR 创建或更新时触发。
 2. checkout 代码。
 3. 根据 PR 的 base/head commit 生成 diff。
-4. 调用 `pnpm ai-review` 生成 Review 内容。
-5. 调用 `pnpm ai-review:comment` 把结果评论回 GitHub PR。
+4. 调用 `pnpm ai-review` 生成结构化 findings。
+5. 调用 `pnpm ai-review:comment` 把 findings 挂到 GitHub PR 的具体代码行。
 
 它对应共同流程里的：
 
@@ -138,13 +138,13 @@ pnpm build
 1. 读取 diff，默认从 `/tmp/pr.diff` 读取，也可以通过 `PR_DIFF` 传入。
 2. 组织前端 Review prompt。
 3. 根据 `AI_REVIEW_PROVIDER` 选择模型 adapter。
-4. 调用模型生成中文 Markdown Review。
-5. 把结果写到 `/tmp/ai-review.md`。
+4. 调用模型生成 JSON findings。
+5. 把结果写到 `/tmp/ai-review-findings.json`。
 
 它对应共同流程里的：
 
 ```text
-组织上下文 -> 调用模型 -> 生成 Review
+组织上下文 -> 调用模型 -> 生成结构化 findings
 ```
 
 当前默认使用 OpenAI / GPT：
@@ -169,13 +169,14 @@ ANTHROPIC_API_KEY=sk-ant-xxx
 
 ```js
 const diffFile = process.env.AI_REVIEW_DIFF_FILE || "/tmp/pr.diff";
-const outputFile = process.env.AI_REVIEW_OUTPUT_FILE || "/tmp/ai-review.md";
+const outputFile =
+  process.env.AI_REVIEW_OUTPUT_FILE || "/tmp/ai-review-findings.json";
 const provider = process.env.AI_REVIEW_PROVIDER || "openai";
 
 const diff = await readDiff();
 ```
 
-这段代码说明脚本默认从 `/tmp/pr.diff` 读取 PR/MR diff，默认把 AI Review 写到 `/tmp/ai-review.md`，默认模型 provider 是 OpenAI。
+这段代码说明脚本默认从 `/tmp/pr.diff` 读取 PR/MR diff，默认把 AI Review findings 写到 `/tmp/ai-review-findings.json`，默认模型 provider 是 OpenAI。
 
 第二块：组织 Review prompt。
 
@@ -192,13 +193,20 @@ const prompt = `
 - 安全问题。
 - 测试缺口。
 
+输出要求：
+- 只输出 JSON 数组，不要 Markdown。
+- 每个元素代表一条 inline comment。
+- 字段包含 file、line、severity、title、body。
+- file 和 line 必须对应本次 diff 的新增/修改行。
+- 如果没有明显问题，输出空数组 []。
+
 代码 diff：
 
 ${diff || "(empty diff)"}
 `;
 ```
 
-这段是 AI Review 的核心规则：告诉模型它的角色、项目背景、检查重点和要审查的 diff。
+这段是 AI Review 的核心规则：告诉模型它的角色、项目背景、检查重点，并要求模型输出可以挂到具体代码行上的结构化 findings。
 
 第三块：根据 provider 选择模型 adapter。
 
@@ -226,14 +234,14 @@ const response = await fetch(`${baseUrl}/responses`, {
   }),
 });
 
-await writeFile(outputFile, review);
+await writeFile(outputFile, JSON.stringify(findings, null, 2));
 ```
 
-这段负责把 prompt 发给模型服务，并把返回的 Review 写成文件，交给后面的评论发布脚本。
+这段负责把 prompt 发给模型服务，并把返回结果写成结构化 JSON 文件，交给后面的 inline comment 发布脚本。
 
 ### 4.5 `scripts/post-review-comment.mjs`
 
-这是平台回写脚本。它不关心 Review 是谁生成的，只负责把 `/tmp/ai-review.md` 发回 PR/MR。
+这是平台回写脚本。它不关心 findings 是谁生成的，只负责把 `/tmp/ai-review-findings.json` 里的每条问题发回 PR/MR 的具体文件和行号。
 
 它通过环境变量判断平台：
 
@@ -248,6 +256,7 @@ GitHub 模式需要：
 GITHUB_TOKEN
 GITHUB_REPOSITORY
 GITHUB_PR_NUMBER
+GITHUB_COMMIT_ID
 ```
 
 GitLab 模式需要：
@@ -266,61 +275,75 @@ CI_MERGE_REQUEST_IID
 
 主要代码可以拆成四块讲。
 
-第一块：读取 Review 文件并判断平台。
+第一块：读取 findings 文件并判断平台。
 
 ```js
-const reviewFile = process.env.AI_REVIEW_OUTPUT_FILE || "/tmp/ai-review.md";
+const reviewFile =
+  process.env.AI_REVIEW_OUTPUT_FILE || "/tmp/ai-review-findings.json";
 const platform = process.env.AI_REVIEW_PLATFORM || detectPlatform();
-const body = await readFile(reviewFile, "utf8");
+const findings = JSON.parse(await readFile(reviewFile, "utf8"));
 ```
 
-这里读取的 `/tmp/ai-review.md`，就是 `ai-review.mjs` 上一步生成的结果。
+这里读取的 `/tmp/ai-review-findings.json`，就是 `ai-review.mjs` 上一步生成的结构化结果。
 
 第二块：根据平台分发。
 
 ```js
 if (platform === "github") {
-  await postGithubComment(body);
+  await postGithubComments(findings);
 } else if (platform === "gitlab") {
-  await postGitlabComment(body);
+  await postGitlabComments(findings);
 }
 ```
 
-这段说明同一份 Review 结果可以发到不同平台。平台差异被隔离在 `postGithubComment` 和 `postGitlabComment` 两个函数里。
+这段说明同一份 findings 可以发到不同平台。平台差异被隔离在 `postGithubComments` 和 `postGitlabComments` 两个函数里。
 
-第三块：发布 GitHub PR 评论。
+第三块：发布 GitHub PR inline comment。
 
 ```js
-await postJson(`${apiUrl}/repos/${repository}/issues/${issueNumber}/comments`, {
+await postJson(`${apiUrl}/repos/${repository}/pulls/${pullNumber}/comments`, {
   headers: {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
   },
   body: {
-    body: commentBody,
+    body: formatComment(comment),
+    commit_id: commitId,
+    path: comment.file,
+    line: comment.line,
+    side: "RIGHT",
   },
 });
 ```
 
-GitHub 的 PR 评论底层使用 issue comments API，所以这里需要 `GITHUB_TOKEN`、`GITHUB_REPOSITORY` 和 `GITHUB_PR_NUMBER`。
+GitHub inline comment 使用 Pull Request review comments API，所以这里需要 `GITHUB_TOKEN`、`GITHUB_REPOSITORY`、`GITHUB_PR_NUMBER` 和 `GITHUB_COMMIT_ID`。
 
-第四块：发布 GitLab MR 评论。
+第四块：发布 GitLab MR inline discussion。
 
 ```js
 await postJson(
-  `${apiUrl}/projects/${encodeURIComponent(projectId)}/merge_requests/${mergeRequestIid}/notes`,
+  `${apiUrl}/projects/${encodeURIComponent(projectId)}/merge_requests/${mergeRequestIid}/discussions`,
   {
     headers: {
       "PRIVATE-TOKEN": token,
     },
     body: {
-      body: commentBody,
+      body: formatComment(comment),
+      position: {
+        position_type: "text",
+        base_sha: baseSha,
+        start_sha: startSha,
+        head_sha: headSha,
+        old_path: comment.file,
+        new_path: comment.file,
+        new_line: comment.line,
+      },
     },
   },
 );
 ```
 
-GitLab 的 MR 评论叫 note，所以这里调用的是 Merge Request notes API，需要 `GITLAB_TOKEN`、`CI_PROJECT_ID` 和 `CI_MERGE_REQUEST_IID`。
+GitLab inline comment 使用 Merge Request discussions API，需要 position 信息，也就是 base/head sha、文件路径和新文件行号。
 
 ### 4.6 `package.json`
 
@@ -397,8 +420,8 @@ ANTHROPIC_API_KEY
 
 1. checkout 代码。
 2. 根据 PR base/head 生成 diff。
-3. 调用 `pnpm ai-review` 生成 `/tmp/ai-review.md`。
-4. 调用 `pnpm ai-review:comment` 评论到 PR。
+3. 调用 `pnpm ai-review` 生成 `/tmp/ai-review-findings.json`。
+4. 调用 `pnpm ai-review:comment` 把问题挂到 PR 的具体文件和行号。
 
 GitHub 回写评论依赖默认的 `GITHUB_TOKEN`，workflow 中需要：
 
@@ -462,8 +485,8 @@ ANTHROPIC_BASE_URL
 
 1. 安装依赖。
 2. 根据 `CI_MERGE_REQUEST_DIFF_BASE_SHA` 和 `CI_COMMIT_SHA` 生成 diff。
-3. 调用 `pnpm ai-review` 生成 Review。
-4. 设置 `AI_REVIEW_PLATFORM=gitlab`，调用 `pnpm ai-review:comment` 评论到 MR。
+3. 调用 `pnpm ai-review` 生成 `/tmp/ai-review-findings.json`。
+4. 设置 `AI_REVIEW_PLATFORM=gitlab`，调用 `pnpm ai-review:comment` 把问题挂到 MR 的具体文件和行号。
 
 ## 7. Prompt 设计
 
@@ -471,7 +494,7 @@ AI Review 的 Prompt 应该明确三件事：
 
 - 项目背景：Next.js、React、TypeScript、Tailwind CSS。
 - 审查重点：正确性、类型安全、状态完整性、可访问性、性能、安全、测试。
-- 输出格式：中文 Markdown，区分阻塞问题和建议优化。
+- 输出格式：JSON findings，每条 finding 包含 `file`、`line`、`severity`、`title`、`body`。
 
 本项目的 Prompt 放在：
 
@@ -495,7 +518,7 @@ OPENAI_API_KEY=sk-xxx
 
 ```text
 输入：PR/MR diff + Review prompt
-输出：Markdown review 或结构化 findings
+输出：可以挂到具体代码行的结构化 findings
 ```
 
 只要某个模型服务能接收文本输入并返回文本结果，就可以接进来。差异主要在模型调用的 adapter 上。
@@ -617,7 +640,7 @@ AI Review 负责语义化检查：
 展示核心链路：
 
 ```text
-diff -> prompt -> model -> markdown review -> PR/MR comment
+diff -> prompt -> model -> findings -> inline comment
 ```
 
 强调：GitHub 和 GitLab 的差异只在“怎么拿 diff”和“怎么发评论”，中间的 AI Review 是同一套。
@@ -647,15 +670,15 @@ diff -> prompt -> model -> markdown review -> PR/MR comment
 
 - 第一步：只做 PR/MR 总结。
 - 第二步：加入通用前端 Review。
-- 第三步：加入团队规范和业务规则。
-- 第四步：加入 inline comment、去重、severity、文件过滤等生产级能力。
+- 第三步：升级为 inline comment。
+- 第四步：加入团队规范、去重、severity、文件过滤等生产级能力。
 - 第五步：把高频有效评论沉淀成 ESLint、单测、组件规范。
 - 第六步：统计有效评论率、误报率、Review 周期变化。
 
 ```mermaid
 flowchart TD
   A["阶段 1: PR/MR 总结"] --> B["阶段 2: 通用前端 Review"]
-  B --> C["阶段 3: 团队规则 Review"]
+  B --> C["阶段 3: inline comment"]
   C --> D["阶段 4: 生产级能力增强"]
   D --> E["阶段 5: 规则沉淀"]
   E --> F["阶段 6: 指标化评估"]
@@ -666,14 +689,13 @@ flowchart TD
 当前 demo 版已经跑通了核心链路：
 
 ```text
-diff -> prompt -> model -> markdown review -> PR/MR comment
+diff -> prompt -> model -> findings -> inline comment
 ```
 
 但真正进入团队生产环境，通常还需要补齐下面这些能力。
 
 | 能力                    | 解决的问题                                 | 实现要点                                                                             | 优先级 |
 | ----------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------ | ------ |
-| inline comment          | 总评不够精确，开发者还要自己定位代码行     | 让模型输出 `file + line + body`，再调用 GitHub/GitLab 的 review comment API          | 高     |
 | 重复评论去重和更新      | 每次 push 都发一批新评论，PR/MR 会被刷屏   | 给评论加隐藏标记，例如 `<!-- ai-review:id -->`，再次运行时更新旧评论或折叠已解决评论 | 高     |
 | severity 分级和阈值控制 | AI 评论轻重不分，容易干扰 Reviewer         | 输出 `blocker / major / minor / suggestion`，只把高等级问题作为阻塞                  | 高     |
 | 文件过滤                | lockfile、dist、快照、生成文件会污染上下文 | 在生成 diff 前过滤文件，忽略 `pnpm-lock.yaml`、`dist/`、`.next/`、快照等             | 高     |
@@ -685,25 +707,28 @@ diff -> prompt -> model -> markdown review -> PR/MR comment
 
 这些能力可以按优先级逐步演进，不需要第一天全部做完。分享时可以把当前 demo 定位成“最小可用闭环”，把上表定位成“生产化路线图”。
 
-### 13.1 inline comment
+### 13.1 本 demo 已升级为 inline comment
 
-demo 版现在是发一个总评，优点是实现简单，缺点是定位不够精确。生产环境里更推荐 inline comment，把问题直接挂到具体文件和代码行。
+当前 demo 不再发一个总评，而是让模型输出结构化 findings，再把每条 finding 挂到具体文件和代码行。
 
-实现思路：
+模型输出格式类似：
 
 ```json
 {
   "file": "app/users/page.tsx",
   "line": 42,
   "severity": "major",
+  "title": "避免使用数组 index 作为 key",
   "body": "这里使用 index 作为 key，列表重新排序时可能导致状态错位，建议使用 user.id。"
 }
 ```
 
-然后根据平台分别调用：
+然后 `post-review-comment.mjs` 根据平台分别调用：
 
 - GitHub Pull Request review comments API。
 - GitLab Merge Request discussions API。
+
+这个设计的好处是：Reviewer 不需要在总评里自己找位置，AI 的建议会直接出现在对应代码行旁边。
 
 ### 13.2 重复评论去重和更新
 
@@ -844,8 +869,8 @@ AI Review 会接触源码和 diff，所以安全边界必须讲清楚：
 - Danger JS: https://danger.systems/js/
 - SonarQube Pull Request Analysis: https://docs.sonarsource.com/sonarqube-server/analyzing-source-code/pull-request-analysis/introduction/
 - GitHub Actions workflow syntax: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
-- GitHub REST API issue comments: https://docs.github.com/en/rest/issues/comments
-- GitLab Merge Request notes API: https://docs.gitlab.com/api/notes/
+- GitHub Pull Request review comments API: https://docs.github.com/en/rest/pulls/comments
+- GitLab Merge Request discussions API: https://docs.gitlab.com/api/discussions/
 - GitLab predefined CI/CD variables: https://docs.gitlab.com/ci/variables/predefined_variables/
 - OpenAI API quickstart: https://platform.openai.com/docs/quickstart/make-your-first-api-request
 - Anthropic Messages API: https://docs.anthropic.com/en/api/messages
